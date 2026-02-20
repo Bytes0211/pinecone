@@ -46,7 +46,7 @@ This pipeline performs the following workflow:
 python main.py
 ```
 
-The script will log each step with colored, timestamped output and progress bars for embedding and upserting.
+The script runs an async pipeline using `PineconeAsyncio`. It logs each step with colored, timestamped output and progress bars for embedding and upserting. Async clients are managed via `async with` context managers to ensure clean session teardown.
 
 ## Configuration
 

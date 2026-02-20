@@ -1,19 +1,22 @@
-# Auto-generated: Basic Pinecone workflow
+# Auto-generated: Basic Pinecone workflow (async version)
 # - Embed texts via Pinecone inference
 # - Create index with derived dimension
-# - Upsert vectors
+# - Upsert vectors concurrently
 # - Fetch one vector
-
+# - Author: scotton
 
 import ast
+import asyncio
+import functools
+import inspect
 import logging
 import os
 import time
-from typing import List, Sequence
+from typing import Any, List, Sequence
 
-from dotenv import load_dotenv
-from pinecone import Pinecone, ServerlessSpec
 from colorlog import ColoredFormatter
+from dotenv import load_dotenv
+from pinecone import PineconeAsyncio, ServerlessSpec
 from tqdm import tqdm
 
 # ---------------------------------------------------------
@@ -63,22 +66,41 @@ CLOUD = "aws"
 REGION = "us-east-1"
 MODEL = "llama-text-embed-v2"
 RECORDS_PATH = "records.txt"
+UPSERT_BATCH_SIZE = 50
+UPSERT_CONCURRENCY = 8
 
 
 # ---------------------------------------------------------
-# Utility: timing decorator
+# Utility: timing decorator (supports sync + async)
 # ---------------------------------------------------------
 def timed_step(step_name: str):
-    """Decorator to measure execution time of a function."""
+    """Decorator to measure execution time of sync or async functions."""
+
     def decorator(func):
-        def wrapper(*args, **kwargs):
+        if inspect.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                logger.info(f"⏳ Starting: {step_name}")
+                start = time.perf_counter()
+                result = await func(*args, **kwargs)
+                end = time.perf_counter()
+                logger.info(f"✅ Completed: {step_name} in {end - start:.3f}s")
+                return result
+
+            return async_wrapper
+
+        @functools.wraps(func)
+        def sync_wrapper(*args, **kwargs):
             logger.info(f"⏳ Starting: {step_name}")
             start = time.perf_counter()
             result = func(*args, **kwargs)
             end = time.perf_counter()
             logger.info(f"✅ Completed: {step_name} in {end - start:.3f}s")
             return result
-        return wrapper
+
+        return sync_wrapper
+
     return decorator
 
 
@@ -105,21 +127,20 @@ def load_records(path: str) -> List[dict]:
 
 
 # ---------------------------------------------------------
-# Ensure index exists
+# Ensure index exists (async)
 # ---------------------------------------------------------
 @timed_step("Ensure Index")
-def ensure_index(pc: Pinecone, name: str, dimension: int):
-    desc = None
+async def ensure_index(pc: PineconeAsyncio, name: str, dimension: int):
+    desc: Any = None
     try:
-        desc = pc.describe_index(name)
+        desc = await pc.describe_index(name)
     except Exception as e:
         if getattr(e, "status", None) not in (None, 404):
             raise
 
     if desc:
         current_dim = (
-            desc.get("dimension")
-            or desc.get("config", {}).get("dimension")
+            desc.get("dimension") or desc.get("config", {}).get("dimension")
             if isinstance(desc, dict)
             else getattr(desc, "dimension", None)
         )
@@ -127,13 +148,13 @@ def ensure_index(pc: Pinecone, name: str, dimension: int):
             logger.warning(
                 f"⚠️ Index '{name}' exists with dimension {current_dim}; recreating with {dimension}."
             )
-            pc.delete_index(name)
+            await pc.delete_index(name)
         else:
             logger.info(f"Index '{name}' already exists with correct dimension.")
             return
 
     logger.info(f"Creating index '{name}' with dimension {dimension} ...")
-    pc.create_index(
+    await pc.create_index(
         name=name,
         dimension=dimension,
         metric=METRIC,
@@ -142,16 +163,15 @@ def ensure_index(pc: Pinecone, name: str, dimension: int):
 
 
 # ---------------------------------------------------------
-# Embed texts (with progress bar)
+# Embed texts (async)
 # ---------------------------------------------------------
 @timed_step("Embed Texts")
-def embed_texts(pc: Pinecone, texts: Sequence[str]) -> List[List[float]]:
+async def embed_texts(pc: PineconeAsyncio, texts: Sequence[str]) -> List[List[float]]:
     if not texts:
         return []
 
-    # Progress bar for embedding batches
-    logger.info("🧠 Generating embeddings...")
-    resp = pc.inference.embed(
+    logger.info("🧠 Generating embeddings asynchronously...")
+    resp = await pc.inference.embed(
         model=MODEL,
         inputs=list(texts),
         parameters={"input_type": "passage"},
@@ -161,7 +181,7 @@ def embed_texts(pc: Pinecone, texts: Sequence[str]) -> List[List[float]]:
     if not data:
         raise RuntimeError("No embedding data returned from inference")
 
-    vectors = []
+    vectors: List[List[float]] = []
     for i, item in enumerate(tqdm(data, desc="Embedding", unit="vec")):
         vals = getattr(item, "values", None) or item.get("values")
         if vals is None:
@@ -172,66 +192,86 @@ def embed_texts(pc: Pinecone, texts: Sequence[str]) -> List[List[float]]:
 
 
 # ---------------------------------------------------------
-# Main workflow
+# Upsert vectors concurrently
 # ---------------------------------------------------------
-def main():
-    logger.info("🚀 Starting Pinecone ingestion workflow")
+@timed_step("Upsert Vectors")
+async def upsert_vectors(index: Any, vectors: List[dict]):
+    if not vectors:
+        logger.info("No vectors to upsert.")
+        return
 
-    pc = Pinecone(api_key=API_KEY)
+    sem = asyncio.Semaphore(UPSERT_CONCURRENCY)
+    progress = tqdm(total=len(vectors), desc="Upserting", unit="vec")
 
-    # Load records
-    records = load_records(RECORDS_PATH)
-    logger.info(f"📄 Loaded {len(records)} records")
+    async def upsert_batch(batch: List[dict]):
+        async with sem:
+            await index.upsert(vectors=batch)
+            progress.update(len(batch))
 
-    # Extract fields
-    texts, ids, metadatas = [], [], []
-    for i, r in enumerate(records):
-        chunk_text = r.get("chunk_text")
-        rec_id = r.get("_id")
-        if not chunk_text:
-            raise ValueError(f"Record {i} missing 'chunk_text'")
-        if not rec_id:
-            raise ValueError(f"Record {i} missing '_id'")
-        texts.append(chunk_text)
-        ids.append(rec_id)
-        metadatas.append({k: v for k, v in r.items() if k not in ("_id", "chunk_text")})
-
-    # Embed
-    embeddings = embed_texts(pc, texts)
-    if len(embeddings) != len(ids):
-        raise RuntimeError("Embedding count does not match record count")
-
-    # Ensure index
-    dimension = len(embeddings[0])
-    ensure_index(pc, INDEX_NAME, dimension)
-
-    # Upsert
-    index = pc.Index(INDEX_NAME)
-    vectors = [
-        {"id": vid, "values": vec, "metadata": meta}
-        for vid, vec, meta in zip(ids, embeddings, metadatas)
+    tasks = [
+        asyncio.create_task(upsert_batch(vectors[i : i + UPSERT_BATCH_SIZE]))
+        for i in range(0, len(vectors), UPSERT_BATCH_SIZE)
     ]
 
-    logger.info(f"⬆️ Upserting {len(vectors)} vectors into '{INDEX_NAME}' ...")
-    start_upsert = time.perf_counter()
+    await asyncio.gather(*tasks)
+    progress.close()
 
-    for v in tqdm(vectors, desc="Upserting", unit="vec"):
-        index.upsert(vectors=[v])
 
-    logger.info(f"✅ Upsert completed in {time.perf_counter() - start_upsert:.3f}s")
+# ---------------------------------------------------------
+# Main workflow
+# ---------------------------------------------------------
+async def main():
+    logger.info("🚀 Starting Pinecone ingestion workflow (async)")
 
-    # Fetch one
-    first_id = ids[0]
-    fetch_start = time.perf_counter()
-    fetch_result = index.fetch(ids=[first_id])
-    logger.info(
-        f"🔍 Fetch completed in {time.perf_counter() - fetch_start:.3f}s — "
-        f"Fetched record for id '{first_id}'"
-    )
-    print(fetch_result)
+    async with PineconeAsyncio(api_key=API_KEY) as pc:
+        # Load records (off the event loop to avoid blocking)
+        records = await asyncio.to_thread(load_records, RECORDS_PATH)
+        logger.info(f"📄 Loaded {len(records)} records")
+
+        # Extract fields
+        texts, ids, metadatas = [], [], []
+        for i, r in enumerate(records):
+            chunk_text = r.get("chunk_text")
+            rec_id = r.get("_id")
+            if not chunk_text:
+                raise ValueError(f"Record {i} missing 'chunk_text'")
+            if not rec_id:
+                raise ValueError(f"Record {i} missing '_id'")
+            texts.append(chunk_text)
+            ids.append(rec_id)
+            metadatas.append({k: v for k, v in r.items() if k not in ("_id", "chunk_text")})
+
+        # Embed
+        embeddings = await embed_texts(pc, texts)
+        if len(embeddings) != len(ids):
+            raise RuntimeError("Embedding count does not match record count")
+
+        # Ensure index
+        dimension = len(embeddings[0])
+        await ensure_index(pc, INDEX_NAME, dimension)
+
+        # Upsert
+        desc = await pc.describe_index(INDEX_NAME)
+        async with pc.IndexAsyncio(host=desc.host) as index:
+            vectors = [
+                {"id": vid, "values": vec, "metadata": meta}
+                for vid, vec, meta in zip(ids, embeddings, metadatas)
+            ]
+
+            await upsert_vectors(index, vectors)
+
+            # Fetch one
+            first_id = ids[0]
+            fetch_start = time.perf_counter()
+            fetch_result = await index.fetch(ids=[first_id])
+            logger.info(
+                f"🔍 Fetch completed in {time.perf_counter() - fetch_start:.3f}s — "
+                f"Fetched record for id '{first_id}'"
+            )
+            print(fetch_result)
 
     logger.info("🎉 Workflow completed successfully")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

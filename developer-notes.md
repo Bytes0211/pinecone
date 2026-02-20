@@ -17,19 +17,28 @@ It’s a minimal, end‑to‑end RAG ingestion pipeline.
 
 ```python
 import ast
+import asyncio
+import functools
+import inspect
 import logging
 import os
-from typing import List, Sequence
+import time
+from typing import Any, List, Sequence
 
+from colorlog import ColoredFormatter
 from dotenv import load_dotenv
-from pinecone import Pinecone, ServerlessSpec
+from pinecone import PineconeAsyncio, ServerlessSpec
+from tqdm import tqdm
 ```
 
 - `ast` is used to safely parse a Python file containing a `records = [...]` list.
-- `logging` for structured logs.
+- `asyncio` drives the async event loop.
+- `functools` / `inspect` support the `@timed_step` decorator for both sync and async functions.
+- `logging` + `colorlog` for colored, structured logs.
 - `dotenv` loads environment variables from `.env`.
-- `Pinecone` is the official client.
-- `ServerlessSpec` configures Pinecone’s serverless index.
+- `PineconeAsyncio` is the async Pinecone client.
+- `ServerlessSpec` configures Pinecone's serverless index.
+- `tqdm` provides progress bars for embedding and upserting.
 
 ---
 
@@ -106,7 +115,7 @@ If no `records` variable is found → raises an error.
 # 📌 `ensure_index()` — Create or Recreate the Index
 
 ```python
-def ensure_index(pc: Pinecone, name: str, dimension: int):
+async def ensure_index(pc: PineconeAsyncio, name: str, dimension: int):
 ```
 
 This function ensures the Pinecone index exists **with the correct vector dimension**.
@@ -138,7 +147,7 @@ This configures Pinecone’s serverless index.
 # 📌 `embed_texts()` — Generate Embeddings
 
 ```python
-def embed_texts(pc: Pinecone, texts: Sequence[str]) -> List[List[float]]:
+async def embed_texts(pc: PineconeAsyncio, texts: Sequence[str]) -> List[List[float]]:
 ```
 
 This function calls Pinecone’s **inference API** to embed text.
@@ -177,8 +186,10 @@ This is the orchestrator.
 ## Step 1 — Initialize Pinecone Client
 
 ```python
-pc = Pinecone(api_key=API_KEY)
+async with PineconeAsyncio(api_key=API_KEY) as pc:
 ```
+
+The client is opened as an async context manager so its underlying aiohttp sessions are closed automatically when the block exits.
 
 ---
 
@@ -235,13 +246,16 @@ The dimension is derived from the first embedding.
 ## Step 6 — Upsert Vectors
 
 ```python
-index = pc.Index(INDEX_NAME)
-vectors = [
-    {"id": vid, "values": vec, "metadata": meta}
-    for vid, vec, meta in zip(ids, embeddings, metadatas)
-]
-index.upsert(vectors=vectors)
+desc = await pc.describe_index(INDEX_NAME)
+async with pc.IndexAsyncio(host=desc.host) as index:
+    vectors = [
+        {"id": vid, "values": vec, "metadata": meta}
+        for vid, vec, meta in zip(ids, embeddings, metadatas)
+    ]
+    await upsert_vectors(index, vectors)
 ```
+
+`IndexAsyncio` is also opened as an async context manager for clean session cleanup. Vectors are upserted concurrently in batches controlled by `UPSERT_BATCH_SIZE` and `UPSERT_CONCURRENCY`.
 
 Each vector contains:
 
@@ -257,8 +271,7 @@ This is the core ingestion step.
 
 ```python
 first_id = ids[0]
-fetch_result = index.fetch(ids=[first_id])
-print(f"Fetched record for id '{first_id}': {fetch_result}")
+fetch_result = await index.fetch(ids=[first_id])
 ```
 
 This verifies the index is working.

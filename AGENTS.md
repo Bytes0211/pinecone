@@ -21,6 +21,7 @@ This is a Pinecone vector database ingestion pipeline written in Python. It embe
 - **Logging** — Use the existing `colorlog`-based logger (`logger`), not `print()`, for operational output
 - **Timing** — Use the `@timed_step("Step Name")` decorator for any new pipeline steps
 - **Configuration** — Constants are module-level (`INDEX_NAME`, `METRIC`, `CLOUD`, `REGION`, `MODEL`, `RECORDS_PATH`); do not hardcode values inside functions
+- **Resource management** — Use `async with` for `PineconeAsyncio` and `IndexAsyncio` to ensure aiohttp sessions are closed properly
 - **Error handling** — Fail fast with descriptive errors; validate inputs early (e.g. missing API key, missing record fields)
 - **Type hints** — Functions use type annotations from `typing`
 
@@ -31,8 +32,8 @@ Each record in `records.txt` must have:
 - Any additional keys become Pinecone vector metadata
 
 ## Environment
-- Python 3.10+
-- Dependencies managed via `requirements.txt` and a local `.venv`
+- Python 3.12+ (managed via `uv`)
+- Dependencies managed via `requirements.txt` and a local `.venv` (created with `uv venv`)
 - API key loaded from `.env` via `python-dotenv`
 
 ## Common Tasks
