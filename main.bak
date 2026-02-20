@@ -1,0 +1,203 @@
+# Auto-generated: Basic Pinecone workflow
+# - Embed texts via Pinecone inference
+# - Create index with derived dimension
+# - Upsert vectors
+# - Fetch one vector
+
+import ast
+import logging
+import os
+from typing import List, Sequence
+
+from dotenv import load_dotenv
+from pinecone import Pinecone, ServerlessSpec
+
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+API_KEY = os.getenv("PINECONE_API_KEY")
+if not API_KEY:
+    raise RuntimeError("PINECONE_API_KEY is not set")
+
+# Config
+INDEX_NAME = "records-index"
+METRIC = "cosine"
+CLOUD = "aws"
+REGION = "us-east-1"
+MODEL = "llama-text-embed-v2"
+RECORDS_PATH = "records.txt"
+
+
+def load_records(path: str) -> List[dict]:
+    """Load the global `records` list from a Python file using AST.
+
+    Args:
+        path: Path to the Python file containing a top-level `records` assignment.
+
+    Returns:
+        A list of record dictionaries loaded from the file.
+
+    Raises:
+        ValueError: If no `records` list is found in the file.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    tree = ast.parse(src, filename=path)
+    records: List[dict] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "records":
+                    records = ast.literal_eval(node.value)
+                    break
+        if records:
+            break
+    if not records:
+        raise ValueError(f"No records found in {path}")
+    return records
+
+
+def validate_index(pc: Pinecone, name: str, dimension: int):
+    """Ensure the index exists at the expected dimension; recreate if mismatched.
+
+    Args:
+        pc: Pinecone client instance.
+        name: Name of the index.
+        dimension: Expected vector dimension.
+
+    Raises:
+        Any exception propagated from Pinecone API calls, except a handled 409 on create
+        and a handled 404 on describe.
+    """
+    desc = None
+    try:
+        desc = pc.describe_index(name)
+    except Exception as e:
+        if getattr(e, "status", None) not in (None, 404):
+            raise
+    if desc:
+        current_dim = None
+        if isinstance(desc, dict):
+            current_dim = desc.get("dimension") or desc.get("config", {}).get(
+                "dimension"
+            )
+        else:
+            current_dim = getattr(desc, "dimension", None)
+        if current_dim and current_dim != dimension:
+            logging.info(
+                "Index '%s' exists with dimension %s; recreating with %d.",
+                name,
+                current_dim,
+                dimension,
+            )
+            pc.delete_index(name)
+        else:
+            logging.info(
+                "Index '%s' already exists with matching dimension; skipping creation.",
+                name,
+            )
+            return
+
+    logging.info("Creating index '%s' with dimension %d ...", name, dimension)
+    try:
+        pc.create_index(
+            name=name,
+            dimension=dimension,
+            metric=METRIC,
+            spec=ServerlessSpec(cloud=CLOUD, region=REGION),
+        )
+    except Exception as e:
+        if getattr(e, "status", None) == 409:
+            logging.info("Index '%s' already exists (409); continuing.", name)
+        else:
+            raise
+
+
+def embed_texts(pc: Pinecone, texts: Sequence[str]) -> List[List[float]]:
+    """Embed text passages with the configured model and return embedding vectors.
+
+    Args:
+        pc: Pinecone client instance.
+        texts: Iterable of text passages to embed.
+
+    Returns:
+        A list of embedding vectors (lists of floats) in the same order as `texts`.
+
+    Raises:
+        RuntimeError: If embeddings are missing or malformed in the inference response.
+    """
+    if not texts:
+        return []
+    resp = pc.inference.embed(
+        model=MODEL,
+        inputs=list(texts),
+        parameters={"input_type": "passage"},
+    )
+    data = getattr(resp, "data", None)
+    if data is None and isinstance(resp, dict):
+        data = resp.get("data")
+    if not data:
+        raise RuntimeError("No embedding data returned from inference")
+    vectors = []
+    for i, item in enumerate(data):
+        vals = getattr(item, "values", None)
+        if vals is None and isinstance(item, dict):
+            vals = item.get("values")
+        if vals is None:
+            raise RuntimeError(f"Missing embedding values at position {i}")
+        vectors.append(list(vals))
+    return vectors
+
+
+def main():
+    """Run the end-to-end workflow: load records, embed, index, upsert, and fetch one."""
+    pc = Pinecone(api_key=API_KEY)
+
+    records = load_records(RECORDS_PATH)
+    logging.info("Loaded %d records", len(records))
+
+    texts = []
+    ids = []
+    metadatas = []
+    prt = 0
+    for i, r in enumerate(records):
+        if prt == 0:
+            print(f'i = {i}\nr = {r}\n\n')
+            prt += 1
+        chunk_text = r.get("chunk_text")
+        rec_id = r.get("_id")
+        if not chunk_text:
+            raise ValueError(f"Record {i} missing 'chunk_text'")
+        if not rec_id:
+            raise ValueError(f"Record {i} missing '_id'")
+        texts.append(chunk_text)
+        ids.append(rec_id)
+        metadatas.append({k: v for k, v in r.items() if k not in ("_id", "chunk_text")})
+
+    embeddings = embed_texts(pc, texts)
+    if not embeddings:
+        raise RuntimeError("No embeddings generated")
+    if len(embeddings) != len(ids):
+        raise RuntimeError("Embedding count does not match record count")
+
+    dimension = len(embeddings[0])
+    validate_index(pc, INDEX_NAME, dimension)
+
+    index = pc.Index(INDEX_NAME)
+    vectors = [
+        {"id": vid, "values": vec, "metadata": meta}
+        for vid, vec, meta in zip(ids, embeddings, metadatas)
+    ]
+
+    logging.info("Upserting %d vectors into '%s' ...", len(vectors), INDEX_NAME)
+    index.upsert(vectors=vectors)
+    logging.info("Upsert completed.")
+
+    first_id = ids[0]
+    fetch_result = index.fetch(ids=[first_id])
+    print(f"Fetched record for id '{first_id}': {fetch_result}")
+
+
+if __name__ == "__main__":
+    main()
