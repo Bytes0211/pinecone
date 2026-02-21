@@ -15,6 +15,7 @@ This is a Pinecone vector database ingestion pipeline written in Python. It embe
 - `.env` — Stores `PINECONE_API_KEY` (never commit to version control)
 - `requirements.txt` — Pinned Python dependencies
 - `developer-notes.md` — Detailed walkthrough of each function and step
+- `test_main.py` — Pytest suite covering all pipeline functions and the main workflow
 - `main-diagram.md` — Mermaid flowchart of the pipeline
 
 ## Conventions
@@ -23,6 +24,7 @@ This is a Pinecone vector database ingestion pipeline written in Python. It embe
 - **Configuration** — Constants are module-level (`INDEX_NAME`, `METRIC`, `CLOUD`, `REGION`, `MODEL`, `RECORDS_PATH`); do not hardcode values inside functions
 - **Error handling** — Fail fast with descriptive errors; validate inputs early (e.g. missing API key, missing record fields)
 - **Type hints** — Functions use type annotations from `typing`
+- **Testing** — Tests live in `test_main.py`; run with `pytest test_main.py -v`. Use `unittest.mock` to mock the Pinecone client; never call the real API in tests
 
 ## Record Schema
 Each record in `records.txt` must have:
@@ -40,3 +42,4 @@ Each record in `records.txt` must have:
 - **Change embedding model** — Update the `MODEL` constant in `main.py`
 - **Change index settings** — Update `INDEX_NAME`, `METRIC`, `CLOUD`, or `REGION` constants
 - **Run the pipeline** — `python main.py`
+- **Run tests** — `pytest test_main.py -v`
