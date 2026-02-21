@@ -22,6 +22,7 @@ import functools
 import inspect
 import logging
 import os
+import random
 import time
 from typing import Any, List, Sequence
 
@@ -35,6 +36,7 @@ from tqdm import tqdm
 - `asyncio` drives the async event loop.
 - `functools` / `inspect` support the `@timed_step` decorator for both sync and async functions.
 - `logging` + `colorlog` for colored, structured logs.
+- `random` adds jitter to retry backoff delays.
 - `dotenv` loads environment variables from `.env`.
 - `PineconeAsyncio` is the async Pinecone client.
 - `ServerlessSpec` configures Pinecone's serverless index.
@@ -65,6 +67,12 @@ CLOUD = "aws"
 REGION = "us-east-1"
 MODEL = "llama-text-embed-v2"
 RECORDS_PATH = "records.txt"
+UPSERT_BATCH_SIZE = 50
+UPSERT_CONCURRENCY = 8
+EMBED_BATCH_SIZE = 32
+MAX_RETRIES = 3
+BACKOFF_BASE = 0.5
+BACKOFF_JITTER = 0.3
 ```
 
 These define:
@@ -74,6 +82,21 @@ These define:
 - Cloud + region for serverless index  
 - Embedding model  
 - Path to the input records file  
+- Upsert batch size and max concurrent upsert tasks  
+- Embedding batch size (texts per API call)  
+- Retry parameters: max attempts, base delay (exponential), and jitter range  
+
+---
+
+# 📌 `run_with_retries()` — Generic Async Retry Helper
+
+```python
+async def run_with_retries(label: str, operation, max_retries: int = MAX_RETRIES):
+```
+
+Retries an async `operation` callable up to `max_retries` times with exponential backoff plus random jitter. On each failure it logs a warning with the attempt number and error, then sleeps `BACKOFF_BASE * 2^(attempt-1) + uniform(0, BACKOFF_JITTER)` seconds. If all attempts fail, the last exception is re-raised.
+
+Used by `embed_texts()` and `upsert_vectors()` to handle transient API errors.
 
 ---
 
@@ -150,30 +173,32 @@ This configures Pinecone’s serverless index.
 async def embed_texts(pc: PineconeAsyncio, texts: Sequence[str]) -> List[List[float]]:
 ```
 
-This function calls Pinecone’s **inference API** to embed text.
+This function calls Pinecone's **inference API** to embed text in batches.
 
 ### What it does:
 
-1. Calls:
+1. Iterates over `texts` in chunks of `EMBED_BATCH_SIZE`
+2. For each batch, calls (with retries via `run_with_retries`):
 
 ```python
 pc.inference.embed(
     model=MODEL,
-    inputs=list(texts),
+    inputs=batch,
     parameters={"input_type": "passage"},
 )
 ```
 
-2. Extracts the embedding vectors from the response  
-3. Validates that each item contains `values`  
-4. Returns a list of float vectors  
+3. Extracts the embedding vectors from each response  
+4. Validates that each item contains `values`  
+5. Returns the combined list of float vectors  
 
 ### Error handling:
 
 - If no data returned → error  
 - If any embedding missing → error  
+- Transient API failures are retried with exponential backoff  
 
-This ensures the ingestion pipeline fails fast.
+This ensures the ingestion pipeline fails fast while tolerating transient errors.
 
 ---
 

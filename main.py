@@ -11,6 +11,7 @@ import functools
 import inspect
 import logging
 import os
+import random
 import time
 from typing import Any, List, Sequence
 
@@ -68,6 +69,31 @@ MODEL = "llama-text-embed-v2"
 RECORDS_PATH = "records.txt"
 UPSERT_BATCH_SIZE = 50
 UPSERT_CONCURRENCY = 8
+EMBED_BATCH_SIZE = 32
+MAX_RETRIES = 3
+BACKOFF_BASE = 0.5
+BACKOFF_JITTER = 0.3
+
+
+async def run_with_retries(label: str, operation, max_retries: int = MAX_RETRIES):
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await operation()
+        except Exception as exc:
+            last_exc = exc
+            if attempt == max_retries:
+                raise
+            delay = BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(
+                0, BACKOFF_JITTER
+            )
+            logger.warning(
+                f"Retrying {label} (attempt {attempt}/{max_retries}) after error: {exc!r}. "
+                f"Sleeping {delay:.2f}s"
+            )
+            await asyncio.sleep(delay)
+    if last_exc:
+        raise last_exc
 
 
 # ---------------------------------------------------------
@@ -171,23 +197,32 @@ async def embed_texts(pc: PineconeAsyncio, texts: Sequence[str]) -> List[List[fl
         return []
 
     logger.info("🧠 Generating embeddings asynchronously...")
-    resp = await pc.inference.embed(
-        model=MODEL,
-        inputs=list(texts),
-        parameters={"input_type": "passage"},
-    )
-
-    data = getattr(resp, "data", None) or resp.get("data")
-    if not data:
-        raise RuntimeError("No embedding data returned from inference")
+    progress = tqdm(total=len(texts), desc="Embedding", unit="vec")
 
     vectors: List[List[float]] = []
-    for i, item in enumerate(tqdm(data, desc="Embedding", unit="vec")):
-        vals = getattr(item, "values", None) or item.get("values")
-        if vals is None:
-            raise RuntimeError(f"Missing embedding values at position {i}")
-        vectors.append(list(vals))
+    for offset in range(0, len(texts), EMBED_BATCH_SIZE):
+        batch = list(texts[offset : offset + EMBED_BATCH_SIZE])
+        resp = await run_with_retries(
+            "embed",
+            lambda b=batch: pc.inference.embed(
+                model=MODEL,
+                inputs=b,
+                parameters={"input_type": "passage"},
+            ),
+        )
 
+        data = getattr(resp, "data", None) or resp.get("data")
+        if not data:
+            raise RuntimeError("No embedding data returned from inference")
+
+        for j, item in enumerate(data):
+            vals = getattr(item, "values", None) or item.get("values")
+            if vals is None:
+                raise RuntimeError(f"Missing embedding values at position {offset + j}")
+            vectors.append(list(vals))
+            progress.update(1)
+
+    progress.close()
     return vectors
 
 
@@ -205,7 +240,9 @@ async def upsert_vectors(index: Any, vectors: List[dict]):
 
     async def upsert_batch(batch: List[dict]):
         async with sem:
-            await index.upsert(vectors=batch)
+            await run_with_retries(
+                "upsert_batch", lambda b=batch: index.upsert(vectors=b)
+            )
             progress.update(len(batch))
 
     tasks = [
@@ -230,7 +267,11 @@ async def main():
 
         # Extract fields
         texts, ids, metadatas = [], [], []
+        ir_check = 0
         for i, r in enumerate(records):
+            if ir_check < 4:
+                print(f'i = {i}\nr = {r}\n\n')
+                ir_check+=1
             chunk_text = r.get("chunk_text")
             rec_id = r.get("_id")
             if not chunk_text:
@@ -239,7 +280,9 @@ async def main():
                 raise ValueError(f"Record {i} missing '_id'")
             texts.append(chunk_text)
             ids.append(rec_id)
-            metadatas.append({k: v for k, v in r.items() if k not in ("_id", "chunk_text")})
+            metadatas.append(
+                {k: v for k, v in r.items() if k not in ("_id", "chunk_text")}
+            )
 
         # Embed
         embeddings = await embed_texts(pc, texts)

@@ -57,6 +57,9 @@ Constants are defined at the top of `main.py`:
 - `CLOUD` / `REGION` — Serverless deployment target (`aws` / `us-east-1`)
 - `MODEL` — Embedding model (`llama-text-embed-v2`)
 - `RECORDS_PATH` — Path to the input records file (`records.txt`)
+- `UPSERT_BATCH_SIZE` / `UPSERT_CONCURRENCY` — Batch size and parallelism for upserts
+- `EMBED_BATCH_SIZE` — Number of texts per embedding API call (`32`)
+- `MAX_RETRIES` / `BACKOFF_BASE` / `BACKOFF_JITTER` — Retry config with exponential backoff + jitter
 
 ## Record Format
 

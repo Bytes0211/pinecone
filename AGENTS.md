@@ -20,8 +20,9 @@ This is a Pinecone vector database ingestion pipeline written in Python. It embe
 ## Conventions
 - **Logging** — Use the existing `colorlog`-based logger (`logger`), not `print()`, for operational output
 - **Timing** — Use the `@timed_step("Step Name")` decorator for any new pipeline steps
-- **Configuration** — Constants are module-level (`INDEX_NAME`, `METRIC`, `CLOUD`, `REGION`, `MODEL`, `RECORDS_PATH`); do not hardcode values inside functions
+- **Configuration** — Constants are module-level (`INDEX_NAME`, `METRIC`, `CLOUD`, `REGION`, `MODEL`, `RECORDS_PATH`, `EMBED_BATCH_SIZE`, `MAX_RETRIES`, `BACKOFF_BASE`, `BACKOFF_JITTER`); do not hardcode values inside functions
 - **Resource management** — Use `async with` for `PineconeAsyncio` and `IndexAsyncio` to ensure aiohttp sessions are closed properly
+- **Retries** — Use `run_with_retries()` for any remote API call (embed, upsert); it applies exponential backoff with jitter
 - **Error handling** — Fail fast with descriptive errors; validate inputs early (e.g. missing API key, missing record fields)
 - **Type hints** — Functions use type annotations from `typing`
 
