@@ -48,6 +48,14 @@ python main.py
 
 The script runs an async pipeline using `PineconeAsyncio`. It logs each step with colored, timestamped output and progress bars for embedding and upserting. Async clients are managed via `async with` context managers to ensure clean session teardown.
 
+## Testing
+
+```bash
+pytest test_main.py -v
+```
+
+The test suite uses `unittest.mock` to mock all Pinecone API calls — no API key or network access is required. Tests cover `load_records`, `ensure_index`, `embed_texts`, `timed_step`, and the full `main()` workflow.
+
 ## Configuration
 
 Constants are defined at the top of `main.py`:
@@ -82,6 +90,7 @@ records = [
 pinecone/
 ├── .env                 # Environment variables (API key)
 ├── main.py              # Ingestion pipeline entry point
+├── test_main.py         # Pytest suite for main.py
 ├── records.txt          # Input dataset (Python list of dicts)
 ├── requirements.txt     # Python dependencies
 ├── developer-notes.md   # Detailed developer walkthrough
@@ -94,3 +103,4 @@ pinecone/
 - `python-dotenv` — Environment variable loading
 - `colorlog` — Colored log output
 - `tqdm` — Progress bars
+- `pytest` — Test framework (dev dependency)

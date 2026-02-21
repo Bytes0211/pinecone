@@ -322,3 +322,25 @@ It’s the minimal backbone of:
 - Chat-with-your-data apps  
 
 ---
+
+# 📌 Testing
+
+Tests live in `test_main.py` and are run with:
+
+```bash
+pytest test_main.py -v
+```
+
+All Pinecone API interactions are mocked via `unittest.mock` — no API key or network access is needed.
+
+### Test coverage:
+
+- `load_records` — valid file, metadata preservation, missing `records` variable, missing file  
+- `ensure_index` — create on 404, skip on matching dimension, recreate on mismatch, propagate unexpected errors  
+- `embed_texts` — empty input, vector extraction, empty response, missing values, correct API params  
+- `timed_step` — return value passthrough, log verification  
+- `main` workflow — full pipeline integration, missing `chunk_text`, missing `_id`  
+
+A `DualAccess` helper class is used to mock objects that need both attribute and `.get()` access (matching how Pinecone response objects behave).
+
+---
