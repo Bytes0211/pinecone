@@ -1,17 +1,16 @@
-
 ```mermaid
 flowchart TD
     Start([Start Workflow]) --> LoadEnv[Load Environment Variables]
     LoadEnv --> CheckAPI{API Key Set?}
     CheckAPI -->|No| Error1[Raise RuntimeError]
-    CheckAPI -->|Yes| InitPC[Initialize PineconeAsyncio Client]
+    CheckAPI -->|Yes| InitPC[Initialize Pinecone Client]
     
     InitPC --> LoadRecords[Load Records from records.txt<br/>Parse AST to extract records list]
     LoadRecords --> ValidateRecords[Extract & Validate Fields<br/>texts, ids, metadata]
     
     ValidateRecords --> CheckFields{All records have<br/>_id & chunk_text?}
     CheckFields -->|No| Error2[Raise ValueError]
-    CheckFields -->|Yes| EmbedTexts[Embed Texts<br/>Batch size: 32<br/>With retries]
+    CheckFields -->|Yes| EmbedTexts[Embed Texts<br/>Single API call via<br/>pc.inference.embed]
     
     EmbedTexts --> CheckCount{Embedding count<br/>matches records?}
     CheckCount -->|No| Error3[Raise RuntimeError]
@@ -31,12 +30,11 @@ flowchart TD
     SkipCreate --> ConnectIndex
     
     ConnectIndex --> PrepareVectors[Prepare Vectors<br/>id, values, metadata]
-    PrepareVectors --> UpsertVectors[Upsert Vectors Concurrently<br/>Batch size: 50<br/>Concurrency: 8<br/>With retries]
+    PrepareVectors --> UpsertVectors[Upsert Vectors<br/>One at a time<br/>with progress bar]
     
     UpsertVectors --> FetchOne[Fetch First Vector<br/>to Verify]
     FetchOne --> PrintResult[Print Fetch Result]
-    PrintResult --> CloseConnections[Close Async Connections]
-    CloseConnections --> End([Workflow Complete])
+    PrintResult --> End([Workflow Complete])
     
     Error1 --> EndError([Exit with Error])
     Error2 --> EndError
