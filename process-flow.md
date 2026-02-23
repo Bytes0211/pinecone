@@ -1,6 +1,7 @@
 ```mermaid
 flowchart TD
-    Start([Start Workflow]) --> LoadEnv[Load Environment Variables]
+    Start([Start Workflow]) --> LogSetup["Logging Setup<br/>Create logs/ directory<br/>Console handler (INFO, colorlog)<br/>File handler (DEBUG, RotatingFileHandler)<br/>LOG_MAX_BYTES=5MB, LOG_BACKUP_COUNT=3"]
+    LogSetup --> LoadEnv[Load Environment Variables]
     LoadEnv --> CheckAPI{API Key Set?}
     CheckAPI -->|No| Error1[Raise RuntimeError]
     CheckAPI -->|Yes| InitPC[Initialize PineconeAsyncio Client<br/>async context manager]
@@ -41,6 +42,15 @@ flowchart TD
     Error2 --> EndError
     Error3 --> EndError
 
+    subgraph Logging
+        direction TB
+        LogEntry([Log Message]) --> ConsoleHandler["Console Handler<br/>StreamHandler + ColoredFormatter<br/>Level: INFO+"]
+        LogEntry --> FileHandler["File Handler<br/>RotatingFileHandler<br/>Level: DEBUG+<br/>logs/pipeline.log"]
+        FileHandler --> Rotation{"File ><br/>LOG_MAX_BYTES?"}
+        Rotation -->|Yes| Rotate["Rotate → pipeline.log.1<br/>Keep up to LOG_BACKUP_COUNT backups"]
+        Rotation -->|No| Write[Append to pipeline.log]
+    end
+
     subgraph Retry Logic
         direction TB
         RetryStart([run_with_retries called]) --> Attempt[Execute Operation]
@@ -62,6 +72,10 @@ flowchart TD
     style EmbedTexts fill:#0D1296
     style UpsertVectors fill:#0D1296
     style CreateIndex fill:#B2AB0E
+    style LogSetup fill:#555555
     style RetryStart fill:#555555
     style RetryEnd fill:#555555
+    style LogEntry fill:#555555
+    style ConsoleHandler fill:#0D6396
+    style FileHandler fill:#0D6396
 ```
