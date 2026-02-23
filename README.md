@@ -7,9 +7,9 @@ A minimal end-to-end RAG ingestion pipeline that loads text records, generates e
 This pipeline performs the following workflow:
 
 1. **Load records** — Parses `records.txt` (a Python-formatted file) using AST for safe literal evaluation
-2. **Embed text** — Generates vector embeddings via Pinecone's hosted `llama-text-embed-v2` model
+2. **Embed text** — Generates vector embeddings in batches via Pinecone's hosted `llama-text-embed-v2` model with retry logic
 3. **Ensure index** — Creates or recreates a serverless Pinecone index with the correct dimension
-4. **Upsert vectors** — Writes vectors (id + embedding + metadata) to the index
+4. **Upsert vectors** — Writes vectors (id + embedding + metadata) to the index using concurrent batched upserts
 5. **Fetch & verify** — Retrieves a single vector to confirm ingestion succeeded
 
 ## Prerequisites
@@ -46,7 +46,14 @@ This pipeline performs the following workflow:
 python main.py
 ```
 
-The script runs an async pipeline using `PineconeAsyncio`. It logs each step with colored, timestamped output and progress bars for embedding and upserting. Async clients are managed via `async with` context managers to ensure clean session teardown.
+The script runs an async pipeline using `PineconeAsyncio`. It logs each step with colored, timestamped output to the console and plain-text rotating logs to `logs/pipeline.log`. Progress bars track embedding and upserting. Async clients are managed via `async with` context managers to ensure clean session teardown.
+
+## Logging
+
+- **Console** — Colored output via `colorlog` at `INFO` level and above
+- **File** — Plain-text rotating log at `logs/pipeline.log` at `DEBUG` level and above
+- **Rotation** — Controlled by `LOG_MAX_BYTES` (default 5 MB) and `LOG_BACKUP_COUNT` (default 3 backups: `pipeline.log.1`, `.2`, `.3`)
+- **Directory** — `logs/` is created automatically on startup and is listed in `.gitignore`
 
 ## Testing
 
@@ -54,20 +61,29 @@ The script runs an async pipeline using `PineconeAsyncio`. It logs each step wit
 pytest test_main.py -v
 ```
 
-The test suite uses `unittest.mock` to mock all Pinecone API calls — no API key or network access is required. Tests cover `load_records`, `ensure_index`, `embed_texts`, `timed_step`, and the full `main()` workflow.
+The test suite uses `unittest.mock` to mock all Pinecone API calls — no API key or network access is required. Tests cover the synchronous components: `load_records` and `timed_step`.
 
 ## Configuration
 
 Constants are defined at the top of `main.py`:
 
-- `INDEX_NAME` — Name of the Pinecone index (`records-index`)
-- `METRIC` — Similarity metric (`cosine`)
-- `CLOUD` / `REGION` — Serverless deployment target (`aws` / `us-east-1`)
-- `MODEL` — Embedding model (`llama-text-embed-v2`)
-- `RECORDS_PATH` — Path to the input records file (`records.txt`)
-- `UPSERT_BATCH_SIZE` / `UPSERT_CONCURRENCY` — Batch size and parallelism for upserts
-- `EMBED_BATCH_SIZE` — Number of texts per embedding API call (`32`)
-- `MAX_RETRIES` / `BACKOFF_BASE` / `BACKOFF_JITTER` — Retry config with exponential backoff + jitter
+| Constant | Default | Description |
+|---|---|---|
+| `INDEX_NAME` | `records-index` | Name of the Pinecone index |
+| `METRIC` | `cosine` | Similarity metric |
+| `CLOUD` / `REGION` | `aws` / `us-east-1` | Serverless deployment target |
+| `MODEL` | `llama-text-embed-v2` | Embedding model |
+| `RECORDS_PATH` | `records.txt` | Path to the input records file |
+| `UPSERT_BATCH_SIZE` | `50` | Vectors per upsert API call |
+| `UPSERT_CONCURRENCY` | `8` | Max parallel upsert tasks |
+| `EMBED_BATCH_SIZE` | `32` | Texts per embedding API call |
+| `MAX_RETRIES` | `3` | Retry attempts for API calls |
+| `BACKOFF_BASE` | `0.5` | Base delay (seconds) for exponential backoff |
+| `BACKOFF_JITTER` | `0.3` | Max random jitter (seconds) added to backoff |
+| `LOG_DIR` | `logs` | Directory for log files |
+| `LOG_FILE` | `logs/pipeline.log` | Path to the rotating log file |
+| `LOG_MAX_BYTES` | `5242880` (5 MB) | Max log file size before rotation |
+| `LOG_BACKUP_COUNT` | `3` | Number of rotated log backups to keep |
 
 ## Record Format
 
@@ -88,13 +104,19 @@ records = [
 
 ```
 pinecone/
-├── .env                 # Environment variables (API key)
-├── main.py              # Ingestion pipeline entry point
-├── test_main.py         # Pytest suite for main.py
-├── records.txt          # Input dataset (Python list of dicts)
-├── requirements.txt     # Python dependencies
-├── developer-notes.md   # Detailed developer walkthrough
-└── main-diagram.md      # Mermaid flow diagram of the pipeline
+├── .env                     # Environment variables (API key; git-ignored)
+├── .gitignore               # Git ignore rules
+├── CLAUDE.md                # Project conventions for AI assistants
+├── README.md                # This file
+├── main.py                  # Ingestion pipeline entry point
+├── test_main.py             # Pytest suite for sync pipeline functions
+├── records.txt              # Input dataset (Python list of dicts)
+├── requirements.txt         # Python dependencies
+├── process-flow.md          # Mermaid flow diagram of the pipeline
+├── docs/
+│   └── developer-notes.md   # Detailed developer walkthrough
+└── logs/                    # Rotating log files (auto-created; git-ignored)
+    └── pipeline.log
 ```
 
 ## Key Dependencies

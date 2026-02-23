@@ -23,6 +23,7 @@ import logging
 import os
 import random
 import time
+from logging.handlers import RotatingFileHandler
 from typing import Any, List, Sequence
 
 from colorlog import ColoredFormatter
@@ -33,8 +34,19 @@ from tqdm import tqdm
 # ---------------------------------------------------------
 # Logging Setup: Colored Logs + Timestamp + Level Coloring
 # ---------------------------------------------------------
-handler = logging.StreamHandler()
-handler.setFormatter(
+
+# File logging config
+LOG_DIR = "logs"
+LOG_FILE = os.path.join(LOG_DIR, "pipeline.log")
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+LOG_BACKUP_COUNT = 3
+
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Console handler — colored, INFO level
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(
     ColoredFormatter(
         "%(log_color)s%(asctime)s [%(levelname)s]%(reset)s %(message_log_color)s%(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -57,9 +69,22 @@ handler.setFormatter(
     )
 )
 
+# File handler — plain text, DEBUG level, rotating
+file_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
 
 # ---------------------------------------------------------
 # Load environment variables
