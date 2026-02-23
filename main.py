@@ -1,9 +1,19 @@
-# Auto-generated: Basic Pinecone workflow (async version)
-# - Embed texts via Pinecone inference
-# - Create index with derived dimension
-# - Upsert vectors concurrently
-# - Fetch one vector
-# - Author: scotton
+"""Async Pinecone vector database ingestion pipeline.
+
+Embeds text records using Pinecone's hosted inference API (llama-text-embed-v2)
+and upserts them into a serverless index. Serves as a minimal RAG ingestion
+backbone.
+
+Pipeline steps:
+    1. Load records from a Python-formatted file via AST parsing.
+    2. Embed text fields in batches through Pinecone inference.
+    3. Ensure a serverless index exists with the correct dimension.
+    4. Upsert vectors concurrently with batching and retry logic.
+    5. Fetch one vector to verify the ingestion.
+
+Author:
+    scotton
+"""
 
 import ast
 import asyncio
@@ -76,6 +86,25 @@ BACKOFF_JITTER = 0.3
 
 
 async def run_with_retries(label: str, operation, max_retries: int = MAX_RETRIES):
+    """Execute an async operation with exponential backoff retries.
+
+    Retries the given async callable up to ``max_retries`` times. On each
+    failure the delay doubles from ``BACKOFF_BASE`` with random jitter
+    added via ``BACKOFF_JITTER``.
+
+    Args:
+        label: A human-readable name for the operation, used in log messages.
+        operation: A zero-argument async callable to execute. Typically a
+            lambda wrapping the real call so arguments are captured.
+        max_retries: Maximum number of attempts before raising. Defaults
+            to the module-level ``MAX_RETRIES`` constant.
+
+    Returns:
+        The return value of ``operation()`` on the first successful attempt.
+
+    Raises:
+        Exception: Re-raises the last exception if all retries are exhausted.
+    """
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -100,7 +129,18 @@ async def run_with_retries(label: str, operation, max_retries: int = MAX_RETRIES
 # Utility: timing decorator (supports sync + async)
 # ---------------------------------------------------------
 def timed_step(step_name: str):
-    """Decorator to measure execution time of sync or async functions."""
+    """Decorator factory that logs the execution time of a pipeline step.
+
+    Automatically detects whether the wrapped function is synchronous or
+    asynchronous and applies the appropriate wrapper. Logs a start message
+    before execution and a completion message (with elapsed seconds) after.
+
+    Args:
+        step_name: A descriptive label for the step, shown in log output.
+
+    Returns:
+        A decorator that wraps the target function with timing and logging.
+    """
 
     def decorator(func):
         if inspect.iscoroutinefunction(func):
@@ -135,6 +175,25 @@ def timed_step(step_name: str):
 # ---------------------------------------------------------
 @timed_step("Load Records")
 def load_records(path: str) -> List[dict]:
+    """Load records from a Python-formatted file using AST parsing.
+
+    Reads the file at ``path``, parses it as a Python module, and extracts
+    the first top-level variable named ``records``. The value is safely
+    evaluated with ``ast.literal_eval``, so only literal Python structures
+    (lists, dicts, strings, numbers, etc.) are allowed.
+
+    Args:
+        path: Filesystem path to the records file (e.g. ``records.txt``).
+
+    Returns:
+        A list of dicts, each containing at minimum ``_id`` and
+        ``chunk_text`` keys.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+        SyntaxError: If the file is not valid Python syntax.
+        ValueError: If no ``records`` variable is found in the file.
+    """
     with open(path, "r", encoding="utf-8") as f:
         src = f.read()
     tree = ast.parse(src, filename=path)
@@ -157,6 +216,23 @@ def load_records(path: str) -> List[dict]:
 # ---------------------------------------------------------
 @timed_step("Ensure Index")
 async def ensure_index(pc: PineconeAsyncio, name: str, dimension: int):
+    """Ensure a Pinecone serverless index exists with the required dimension.
+
+    Checks whether an index with the given ``name`` already exists. If it
+    exists with a mismatched dimension, the index is deleted and recreated.
+    If it exists with the correct dimension, the function returns immediately.
+    If no index exists, a new one is created using the module-level
+    ``METRIC``, ``CLOUD``, and ``REGION`` constants.
+
+    Args:
+        pc: An initialised ``PineconeAsyncio`` client instance.
+        name: The name of the index to create or verify.
+        dimension: The required vector dimension for the index.
+
+    Raises:
+        Exception: Any Pinecone API error other than a 404 (not found) when
+            describing the index.
+    """
     desc: Any = None
     try:
         desc = await pc.describe_index(name)
@@ -193,6 +269,26 @@ async def ensure_index(pc: PineconeAsyncio, name: str, dimension: int):
 # ---------------------------------------------------------
 @timed_step("Embed Texts")
 async def embed_texts(pc: PineconeAsyncio, texts: Sequence[str]) -> List[List[float]]:
+    """Generate vector embeddings for a sequence of text strings.
+
+    Texts are processed in batches of ``EMBED_BATCH_SIZE`` using the
+    Pinecone hosted inference endpoint (model configured by the ``MODEL``
+    constant). Each batch call is wrapped in ``run_with_retries`` for
+    resilience. A ``tqdm`` progress bar tracks per-vector progress.
+
+    Args:
+        pc: An initialised ``PineconeAsyncio`` client instance.
+        texts: The text strings to embed. Each string is treated as a
+            "passage" input type for the embedding model.
+
+    Returns:
+        A list of embedding vectors (each a list of floats), in the same
+        order as the input ``texts``.
+
+    Raises:
+        RuntimeError: If the inference API returns no data or if any
+            individual embedding is missing its ``values`` field.
+    """
     if not texts:
         return []
 
@@ -231,6 +327,22 @@ async def embed_texts(pc: PineconeAsyncio, texts: Sequence[str]) -> List[List[fl
 # ---------------------------------------------------------
 @timed_step("Upsert Vectors")
 async def upsert_vectors(index: Any, vectors: List[dict]):
+    """Upsert vectors into a Pinecone index with concurrent batching.
+
+    Splits ``vectors`` into chunks of ``UPSERT_BATCH_SIZE`` and upserts
+    them concurrently, limiting parallelism with an ``asyncio.Semaphore``
+    set to ``UPSERT_CONCURRENCY``. Each batch is retried on failure via
+    ``run_with_retries``. A ``tqdm`` progress bar tracks per-vector progress.
+
+    Args:
+        index: A connected Pinecone ``IndexAsyncio`` instance.
+        vectors: A list of vector dicts, each containing ``id`` (str),
+            ``values`` (list of floats), and ``metadata`` (dict) keys.
+
+    Raises:
+        Exception: Any Pinecone API error that persists after all retries
+            in a batch upsert call.
+    """
     if not vectors:
         logger.info("No vectors to upsert.")
         return
@@ -258,6 +370,22 @@ async def upsert_vectors(index: Any, vectors: List[dict]):
 # Main workflow
 # ---------------------------------------------------------
 async def main():
+    """Run the full Pinecone ingestion workflow.
+
+    Orchestrates the end-to-end pipeline:
+        1. Initialises a ``PineconeAsyncio`` client via async context manager.
+        2. Loads records from ``RECORDS_PATH`` on a background thread.
+        3. Validates that every record has ``_id`` and ``chunk_text`` fields.
+        4. Embeds all ``chunk_text`` values in batches.
+        5. Ensures the target index exists with the correct dimension.
+        6. Connects to the index and upserts all vectors concurrently.
+        7. Fetches the first vector back as a verification step.
+
+    Raises:
+        RuntimeError: If ``PINECONE_API_KEY`` is not set, embedding counts
+            do not match record counts, or the inference API returns no data.
+        ValueError: If any record is missing ``_id`` or ``chunk_text``.
+    """
     logger.info("🚀 Starting Pinecone ingestion workflow (async)")
 
     async with PineconeAsyncio(api_key=API_KEY) as pc:
@@ -270,8 +398,8 @@ async def main():
         ir_check = 0
         for i, r in enumerate(records):
             if ir_check < 4:
-                print(f'i = {i}\nr = {r}\n\n')
-                ir_check+=1
+                print(f"i = {i}\nr = {r}\n\n")
+                ir_check += 1
             chunk_text = r.get("chunk_text")
             rec_id = r.get("_id")
             if not chunk_text:
